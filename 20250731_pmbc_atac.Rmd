@@ -1,0 +1,749 @@
+---
+title: "CIRCRES/2025/326808R1"
+output: html_notebook
+---
+
+```{r setup, include=TRUE, message = FALSE}
+
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now, units = "secs")
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE,
+  error = TRUE
+)
+
+
+
+#BiocManager::install("GO.db", force = TRUE)
+#BiocManager::install("chromVAR")
+
+#library(chromVAR)
+
+library(scCustomize)
+library(BiocManager)
+library(S4Vectors)
+library(IRanges)
+library(GenomicRanges)
+library(AnnotationHub)
+library(monocle3)
+library(dplyr)
+library(Seurat)
+library(monocle3)
+library(sctransform)
+library(future)
+library(EnsDb.Hsapiens.v86)
+library(Matrix)
+library(irlba)
+library(Signac)
+library(glmGamPoi)
+library(batchelor)
+library(AnnotationHub)
+library(multtest)
+library(metap)
+library(Signac)
+library(Seurat)
+library(JASPAR2020)
+library(TFBSTools)
+library(patchwork)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(chromVAR)
+# for plotting
+library(ggplot2)
+library(patchwork)
+set.seed(1234)
+library(tibble)
+library(ggpubr)
+
+library(future)
+options(future.globals.maxSize = 32000 * 1024^2) # for 16 Gb RAM
+set.seed(1234)
+
+```
+
+#Load in Data and create matrix
+
+```{r}
+data_dir.1 <- '../ATACseq SSBP PBMC/S11D2_results_MULTIOME/filtered_feature_bc_matrix'
+data_dir.2 <- '../ATACseq SSBP PBMC/S11D3_results_MULTIOME/filtered_feature_bc_matrix'
+data_dir.3 <- '../ATACseq SSBP PBMC/S13D2_results_MULTIOME/filtered_feature_bc_matrix'
+data_dir.4 <- '../ATACseq SSBP PBMC/S13D3_results_MULTIOME/filtered_feature_bc_matrix'
+
+fragpath.1 <- "../ATACseq SSBP PBMC/S11D2_atac_fragments.tsv.gz"
+fragpath.2 <- "../ATACseq SSBP PBMC/S11D3_atac_fragments.tsv.gz"
+fragpath.3 <- "../ATACseq SSBP PBMC/S13D2_atac_fragments.tsv.gz"
+fragpath.4 <- "../ATACseq SSBP PBMC/S13D3_atac_fragments.tsv.gz"
+
+list.files(data_dir.1)
+expression.matrix.1 <- Read10X(data.dir = data_dir.1)
+expression.matrix.2 <- Read10X(data.dir = data_dir.2)
+expression.matrix.3 <- Read10X(data.dir = data_dir.3)
+expression.matrix.4 <- Read10X(data.dir = data_dir.4)
+
+data_dir.1
+```
+
+#RNA analysis
+
+```{r message = FALSE}
+# Extract RNA data
+rna.counts.1 <- expression.matrix.1$'Gene Expression'
+rna.counts.2 <- expression.matrix.2$'Gene Expression'
+rna.counts.3 <- expression.matrix.3$'Gene Expression'
+rna.counts.4 <- expression.matrix.4$'Gene Expression'
+
+rna.1 <- CreateSeuratObject(counts = rna.counts.1, project = "SS-SL", assay = "RNA")
+rna.2 <- CreateSeuratObject(counts = rna.counts.2, project = "SS-SD", assay = "RNA")
+rna.3 <- CreateSeuratObject(counts = rna.counts.3, project = "SR-SL", assay = "RNA")
+rna.4 <- CreateSeuratObject(counts = rna.counts.4, project = "SR-SD", assay = "RNA")
+
+#rna.1[["percent.mt"]] <- PercentageFeatureSet(rna.1, pattern = "^MT-")
+#rna.2[["percent.mt"]] <- PercentageFeatureSet(rna.2, pattern = "^MT-")
+#rna.3[["percent.mt"]] <- PercentageFeatureSet(rna.3, pattern = "^MT-")
+#rna.4[["percent.mt"]] <- PercentageFeatureSet(rna.4, pattern = "^MT-")
+rna.1$dataset <- "SS-SL"
+rna.2$dataset <- "SS-SD"
+rna.3$dataset <- "SR-SL"
+rna.4$dataset <- "SR-SD"
+```
+
+#Create ATAC objects for each sample
+
+```{r}
+atac.counts.1 <- expression.matrix.1$Peaks
+atac.counts.2 <- expression.matrix.2$Peaks
+atac.counts.3 <- expression.matrix.3$Peaks
+atac.counts.4 <- expression.matrix.4$Peaks
+
+#Convert to genomic ranges
+grange.counts.1 <- StringToGRanges(regions = rownames(atac.counts.1), sep =c(":", "-"))
+grange.counts.2 <- StringToGRanges(regions = rownames(atac.counts.2), sep =c(":", "-"))
+grange.counts.3 <- StringToGRanges(regions = rownames(atac.counts.3), sep =c(":", "-"))
+grange.counts.4 <- StringToGRanges(regions = rownames(atac.counts.4), sep =c(":", "-"))
+
+#filter granges for standard chromosomes
+standard_peaks <- seqnames(grange.counts.1) %in% standardChromosomes(grange.counts.1)
+standard_peaks <- seqnames(grange.counts.2) %in% standardChromosomes(grange.counts.2)
+standard_peaks <- seqnames(grange.counts.3) %in% standardChromosomes(grange.counts.3)
+standard_peaks <- seqnames(grange.counts.4) %in% standardChromosomes(grange.counts.4)
+
+grange.counts.1 <- grange.counts.1[standard_peaks]
+grange.counts.2 <- grange.counts.2[standard_peaks]
+grange.counts.3 <- grange.counts.3[standard_peaks]
+grange.counts.4 <- grange.counts.4[standard_peaks]
+
+#Create a unified set of peaks to quantify in each dataset
+combined.peaks <- reduce(c(grange.counts.1, grange.counts.2, grange.counts.3, grange.counts.4))
+
+#filter out bad peaks based on length
+peakwidths <- width(combined.peaks)
+combined.peaks <- combined.peaks[peakwidths < 10000 & peakwidths > 20]
+combined.peaks
+
+
+#Create Fragment objects
+cells.1 <- colnames(expression.matrix.1$Peaks)
+cells.2 <- colnames(expression.matrix.2$Peaks)
+cells.3 <- colnames(expression.matrix.3$Peaks)
+cells.4 <- colnames(expression.matrix.4$Peaks)
+
+frag.1 <- CreateFragmentObject(
+  path = fragpath.1,
+  cells = cells.1
+)
+frag.2 <- CreateFragmentObject(
+  path = fragpath.2,
+  cells = cells.2
+)
+frag.3 <- CreateFragmentObject(
+  path = fragpath.3,
+  cells = cells.3
+)
+frag.4 <- CreateFragmentObject(
+  path = fragpath.4,
+  cells = cells.4
+)
+
+#New counts based on unions
+new.atac.counts.1 <- FeatureMatrix(fragments = frag.1, features = combined.peaks, cells = cells.1)
+new.atac.counts.2 <- FeatureMatrix(fragments = frag.2, features = combined.peaks, cells = cells.2)
+new.atac.counts.3 <- FeatureMatrix(fragments = frag.3, features = combined.peaks, cells = cells.3)
+new.atac.counts.4 <- FeatureMatrix(fragments = frag.4, features = combined.peaks, cells = cells.4)
+
+rna.1[["ATAC"]] <- CreateChromatinAssay(
+  counts = new.atac.counts.1, 
+  sep = c(":", "-"), 
+  fragments = fragpath.1, 
+  min.cells = 10,
+  genome = "hg38"
+)
+
+rna.2[["ATAC"]] <- CreateChromatinAssay(
+  counts = new.atac.counts.2, 
+  sep = c(":", "-"), 
+  fragments = fragpath.2, 
+  min.cells = 10,
+  genome = "hg38"
+)
+
+rna.3[["ATAC"]] <- CreateChromatinAssay(
+  counts = new.atac.counts.3, 
+  sep = c(":", "-"), 
+  fragments = fragpath.3, 
+  min.cells = 10,
+  genome = "hg38"
+)
+
+rna.4[["ATAC"]] <- CreateChromatinAssay(
+  counts = new.atac.counts.4, 
+  sep = c(":", "-"), 
+  fragments = fragpath.4, 
+  min.cells = 10,
+  genome = "hg38"
+)
+
+rna.1[["percent.mt"]]<- PercentageFeatureSet(rna.1, pattern = "^MT-")
+rna.2[["percent.mt"]]<- PercentageFeatureSet(rna.2, pattern = "^MT-")
+rna.3[["percent.mt"]]<- PercentageFeatureSet(rna.3, pattern = "^MT-")
+rna.4[["percent.mt"]]<- PercentageFeatureSet(rna.4, pattern = "^MT-")
+
+pbmc.1 <- rna.1
+pbmc.2 <- rna.2
+pbmc.3 <- rna.3
+pbmc.4 <- rna.4
+
+granges(pbmc.1[["ATAC"]])
+granges(pbmc.2[["ATAC"]])
+granges(pbmc.3[["ATAC"]])
+granges(pbmc.4[["ATAC"]])
+
+#let's annotate some sequences
+ah <- AnnotationHub()
+query(ah, "EnsDb.Hsapiens.v98")
+ensdb_v98 <- ah[["AH75011"]]
+#extract gene annotations from EnsDb
+annotations <- GetGRangesFromEnsDb(ensdb = ensdb_v98) 
+#change to UCSC style
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "hg38"
+
+seqlevelsStyle(pbmc.1[["ATAC"]]) <- "UCSC"
+
+
+Annotation(pbmc.1[["ATAC"]]) <- annotations
+Annotation(pbmc.2[["ATAC"]]) <- annotations
+Annotation(pbmc.3[["ATAC"]]) <- annotations
+Annotation(pbmc.4[["ATAC"]]) <- annotations
+
+seqlevels(pbmc.1[["ATAC"]])
+
+# Get GRanges object
+gr1 <- granges(pbmc.1[["ATAC"]])
+gr2 <- granges(pbmc.2[["ATAC"]])
+gr3 <- granges(pbmc.3[["ATAC"]])
+gr4 <- granges(pbmc.4[["ATAC"]])
+
+# Identify peaks in standard chromosomes
+keep_peaks.1 <- seqnames(gr1) %in% standardChromosomes(gr1)
+keep_peaks.2 <- seqnames(gr2) %in% standardChromosomes(gr2)
+keep_peaks.3 <- seqnames(gr3) %in% standardChromosomes(gr3)
+keep_peaks.4 <- seqnames(gr4) %in% standardChromosomes(gr4)
+
+# Subset the GRanges objects directly
+gr1_filtered <- gr1[keep_peaks.1]
+gr2_filtered <- gr2[keep_peaks.2]
+gr3_filtered <- gr3[keep_peaks.3]
+gr4_filtered <- gr4[keep_peaks.4]
+
+# Assign back the filtered GRanges to ATAC assay
+pbmc.1[["ATAC"]] <- subset(pbmc.1[["ATAC"]], features = names(gr1_filtered))
+pbmc.2[["ATAC"]] <- subset(pbmc.2[["ATAC"]], features = names(gr2_filtered))
+pbmc.3[["ATAC"]] <- subset(pbmc.3[["ATAC"]], features = names(gr3_filtered))
+pbmc.4[["ATAC"]] <- subset(pbmc.4[["ATAC"]], features = names(gr4_filtered))
+
+# Check seqlevels again
+seqlevels(pbmc.1[["ATAC"]])
+
+#get standard chromosomes
+std_chroms <- paste0("chr", c(1:22, "X", "Y"))
+
+# Get GRanges from ATAC assay
+gr1 <- granges(pbmc.1[["ATAC"]])
+gr2 <- granges(pbmc.2[["ATAC"]])
+gr3 <- granges(pbmc.3[["ATAC"]])
+gr4 <- granges(pbmc.4[["ATAC"]])
+
+# Filter only standard chromosomes
+gr1_filtered <- gr1[seqnames(gr1) %in% std_chroms]
+gr2_filtered <- gr2[seqnames(gr2) %in% std_chroms]
+gr3_filtered <- gr3[seqnames(gr3) %in% std_chroms]
+gr4_filtered <- gr4[seqnames(gr4) %in% std_chroms]
+
+seqlevels(gr1_filtered) <- seqlevelsInUse(gr1_filtered)
+seqlevels(gr2_filtered) <- seqlevelsInUse(gr2_filtered)
+seqlevels(gr3_filtered) <- seqlevelsInUse(gr3_filtered)
+seqlevels(gr4_filtered) <- seqlevelsInUse(gr4_filtered)
+
+
+# Verify the update
+seqlevels(pbmc.1[["ATAC"]])
+seqlevels(pbmc.2[["ATAC"]])
+seqlevels(pbmc.3[["ATAC"]])
+seqlevels(pbmc.4[["ATAC"]])
+
+saveRDS(pbmc.1, "pbmc1_unanalyzed.rds")
+saveRDS(pbmc.2, "pbmc2_unanalyzed.rds")
+saveRDS(pbmc.3, "pbmc3_unanalyzed.rds")
+saveRDS(pbmc.4, "pbmc4_unanalyzed.rds")
+
+pbmc.1 <- readRDS("../ATACseq SSBP PBMC/pbmc1_unanalyzed.rds")
+pbmc.2 <- readRDS("../ATACseq SSBP PBMC/pbmc2_unanalyzed.rds")
+pbmc.3 <- readRDS("../ATACseq SSBP PBMC/pbmc3_unanalyzed.rds")
+pbmc.4 <- readRDS("../ATACseq SSBP PBMC/pbmc4_unanalyzed.rds")
+```
+
+#QC and ATAC/RNA Analysis
+
+```{r}
+DefaultAssay(pbmc.1) <- "ATAC"
+DefaultAssay(pbmc.2) <- "ATAC"
+DefaultAssay(pbmc.3) <- "ATAC"
+DefaultAssay(pbmc.4) <- "ATAC"
+
+pbmc.1 <- NucleosomeSignal(pbmc.1)
+pbmc.2 <- NucleosomeSignal(pbmc.2)
+pbmc.3 <- NucleosomeSignal(pbmc.3)
+pbmc.4 <- NucleosomeSignal(pbmc.4)
+
+pbmc.1 <- TSSEnrichment(pbmc.1, fast = FALSE)
+pbmc.2 <- TSSEnrichment(pbmc.2, fast = FALSE)
+pbmc.3 <- TSSEnrichment(pbmc.3, fast = FALSE)
+pbmc.4 <- TSSEnrichment(pbmc.4, fast = FALSE)
+
+DensityScatter(pbmc.1, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+DensityScatter(pbmc.2, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+DensityScatter(pbmc.3, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+DensityScatter(pbmc.4, x = 'nCount_ATAC', y = 'TSS.enrichment', log_x = TRUE, quantiles = TRUE)
+
+VlnPlot(pbmc.1, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "TSS.enrichment", "nucleosome_signal"), ncol = 5, log = TRUE, pt.size = 0) + NoLegend()
+VlnPlot(pbmc.2, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "TSS.enrichment", "nucleosome_signal"), ncol = 5, log = TRUE, pt.size = 0) + NoLegend()
+VlnPlot(pbmc.3, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "TSS.enrichment", "nucleosome_signal"), ncol = 5, log = TRUE, pt.size = 0) + NoLegend()
+VlnPlot(pbmc.4, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "TSS.enrichment", "nucleosome_signal"), ncol = 5, log = TRUE, pt.size = 0) + NoLegend()
+
+#filter out low quality cells
+pbmc.1 <- subset(
+  x = pbmc.1,
+  subset = nCount_ATAC < 10000 &
+    nCount_ATAC > 100 &
+    nCount_RNA < 12000 &
+    nCount_RNA > 500 &
+    percent.mt < 15 & 
+    nucleosome_signal < 2 &
+    TSS.enrichment > 3
+)
+pbmc.2 <- subset(
+  x = pbmc.2,
+  subset = nCount_ATAC < 10000 &
+    nCount_ATAC > 100 &
+    nCount_RNA < 12000 &
+    nCount_RNA > 500 &
+    percent.mt < 15 & 
+    nucleosome_signal < 2 &
+    TSS.enrichment > 3
+)
+pbmc.3 <- subset(
+  x = pbmc.3,
+  subset = nCount_ATAC < 10000 &
+    nCount_ATAC > 100 &
+    nCount_RNA < 12000 &
+    nCount_RNA > 500 &
+    percent.mt < 15 & 
+    nucleosome_signal < 2 &
+    TSS.enrichment > 3
+)
+pbmc.4 <- subset(
+  x = pbmc.4,
+  subset = nCount_ATAC < 10000 &
+    nCount_ATAC > 100 &
+    nCount_RNA < 12000 &
+    nCount_RNA > 500 &
+    percent.mt < 15 & 
+    nucleosome_signal < 2 &
+    TSS.enrichment > 3
+)
+
+
+```
+
+#Gene Expression Data Processing, merging objects, re-processing the merged object
+
+```{r}
+#normalize gene expression using SCTransform and reduce dimensionality using PCA
+DefaultAssay(pbmc.1) <- "RNA"
+DefaultAssay(pbmc.2) <- "RNA"
+DefaultAssay(pbmc.3) <- "RNA"
+DefaultAssay(pbmc.4) <- "RNA"
+
+pbmc.1 <- NormalizeData(pbmc.1) %>% FindVariableFeatures() %>% ScaleData() 
+pbmc.2 <- NormalizeData(pbmc.2) %>% FindVariableFeatures() %>% ScaleData() 
+pbmc.3 <- NormalizeData(pbmc.3) %>% FindVariableFeatures() %>% ScaleData() 
+pbmc.4 <- NormalizeData(pbmc.4) %>% FindVariableFeatures() %>% ScaleData() 
+
+pbmc.1 <- RunPCA(pbmc.1) %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+pbmc.2 <- RunPCA(pbmc.2) %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+pbmc.3 <- RunPCA(pbmc.3) %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+pbmc.4 <- RunPCA(pbmc.4) %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+
+
+DefaultAssay(pbmc.1) <- "ATAC"
+DefaultAssay(pbmc.2) <- "ATAC"
+DefaultAssay(pbmc.3) <- "ATAC"
+DefaultAssay(pbmc.4) <- "ATAC"
+
+pbmc.1 <-  RunTFIDF(pbmc.1) %>% FindTopFeatures(min.cutoff = 5) %>% RunSVD() %>% RunUMAP (reduction = 'lsi', dims = 2:50, reduction.name = 'umap.atac', reduction.key = 'atacUMAP_')
+pbmc.2 <-  RunTFIDF(pbmc.2) %>% FindTopFeatures(min.cutoff = 5) %>% RunSVD() %>% RunUMAP (reduction = 'lsi', dims = 2:50, reduction.name = 'umap.atac', reduction.key = 'atacUMAP_')
+pbmc.3 <-  RunTFIDF(pbmc.3) %>% FindTopFeatures(min.cutoff = 5) %>% RunSVD() %>% RunUMAP (reduction = 'lsi', dims = 2:50, reduction.name = 'umap.atac', reduction.key = 'atacUMAP_')
+pbmc.4 <-  RunTFIDF(pbmc.4) %>% FindTopFeatures(min.cutoff = 5) %>% RunSVD() %>% RunUMAP (reduction = 'lsi', dims = 2:50, reduction.name = 'umap.atac', reduction.key = 'atacUMAP_')
+
+DefaultAssay(pbmc.1) <- "RNA"
+DefaultAssay(pbmc.2) <- "RNA"
+DefaultAssay(pbmc.3) <- "RNA"
+DefaultAssay(pbmc.4) <- "RNA"
+
+saveRDS(pbmc.1, "pbmc1_analyzed.rds")
+saveRDS(pbmc.2, "pbmc2_analyzed.rds")
+saveRDS(pbmc.3, "pbmc3_analyzed.rds")
+saveRDS(pbmc.4, "pbmc4_analyzed.rds")
+
+
+pbmc.1 <- readRDS("../ATACseq SSBP PBMC/pbmc1_analyzed.rds")
+pbmc.2 <- readRDS("../ATACseq SSBP PBMC/pbmc2_analyzed.rds")
+pbmc.3 <- readRDS("../ATACseq SSBP PBMC/pbmc3_analyzed.rds")
+pbmc.4 <- readRDS("../ATACseq SSBP PBMC/pbmc4_analyzed.rds")
+
+seqlevels(pbmc.1[["ATAC"]])
+
+pbmc.combined <- merge(
+  x = pbmc.1, 
+  y = list(pbmc.2, pbmc.3, pbmc.4), 
+  add.cell.ids = c("SS-SL", "SS-SD", "SR-SL", "SR-SD"), 
+  project = "SSBP")
+
+pbmc.combined <- NormalizeData(pbmc.combined) %>% FindVariableFeatures() %>% ScaleData() 
+pbmc.combined <- RunPCA(pbmc.combined) %>% RunUMAP(dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+DefaultAssay(pbmc.combined) <- "ATAC"
+
+pbmc.combined <-  RunTFIDF(pbmc.combined) %>% FindTopFeatures(min.cutoff = 5) %>% RunSVD() %>% RunUMAP (reduction = 'lsi', dims = 2:50, reduction.name = 'umap.atac', reduction.key = 'atacUMAP_')
+
+```
+
+#Integration RNA
+
+```{r, fig.asp=.5, fig.width = '400px', fig.height='200px'}
+library(harmony)
+DefaultAssay(pbmc.combined) <- "RNA"
+pbmc.combined <- RunHarmony(pbmc.combined, group.by.vars = "orig.ident", dims.use = 1:50, max.iter.harmony = 50)
+pbmc.combined <- RunUMAP(pbmc.combined, reduction = "harmony", dims = 1:50)
+pbmc.combined <- FindNeighbors(pbmc.combined, reduction = "harmony", dims = 1:50) %>% FindClusters(resolution = 0.6)
+
+saveRDS(pbmc.combined, "rna_harmony_integrated_pbmc_combined.rds")
+pbmc.combined <- readRDS("../ATACseq SSBP PBMC/rna_harmony_integrated_pbmc_combined.rds")
+p1 <- UMAPPlot(pbmc.combined, group.by = "orig.ident")
+p2 <- UMAPPlot(pbmc.combined, label = T)
+p1+p2
+```
+
+#ATAC Non-linear dimension reduction with UMAP Visualization
+
+```{r, fig.asp=1, fig.width = '200px'}
+DefaultAssay(pbmc.combined) <- "ATAC"
+
+p1 <- ElbowPlot(pbmc.combined, ndims = 50, reduction = "lsi")
+p2 <- DepthCor(pbmc.combined, n = 50)
+p1+p2
+
+p3 <- DimPlot(pbmc.combined, group.by = "orig.ident", reduction = "umap") 
+p4 <- FeaturePlot(pbmc.combined, reduction = "umap", c("LYZ", "NKG7", "CCL5", "IL32", "FCGR3A", "CD1C"))
+p3
+p4
+```
+
+#Integrate ATAC assay
+
+```{r, fig.asp=1, fig.width = '200px'}
+library(harmony)
+pbmc.combined <- RunHarmony(pbmc.combined,
+                            group.by.vars = "orig.ident",
+                            assay.use = "ATAC",
+                            reduction = "lsi",
+                            dims.use = 2:50,
+                            reduction.save = "harmony_atac",
+                            project.dim = FALSE)
+pbmc.combined <- RunUMAP(pbmc.combined, 
+                         reduction = "harmony_atac",
+                         dims = 1:ncol(Embeddings(pbmc.combined, "harmony_atac")),
+                         reduction.name = "umap_harmony_atac",
+                         reduction.key = "UMAPharmonyATAC_")
+
+  p1 <- DimPlot(pbmc.combined,
+                group.by = "orig.ident",
+                reduction = "umap_harmony_atac") + ggtitle("ATAC Harmony UMAP")
+  p2 <- FeaturePlot(pbmc.combined,
+                    c("LYZ", "NKG7", "CCL5", "IL32", "FCGR3A", "CD1C"),
+                    reduction = "umap_harmony_atac") & NoAxes() & NoLegend()
+  p1 / p2
+```
+
+#Azimuth Annotation
+
+```{r, fig.asp=.75, fig.width = '800px'}
+#Install Azithmuth - web-tool that maps user-uploaded datasets
+devtools::install_github("satijalab/azimuth", "seurat5")
+library(Azimuth)
+library(SeuratData)
+#downgrade seurat to get ref and my object to line up
+remotes::install_version(package = 'Seurat', version = package_version('5.3.0'))
+library(Seurat)
+packageVersion('Seurat')
+
+
+InstallData("pbmcref")
+
+#RunAzimuth function can take a Seurat object as input, pbmcref included in the function
+DefaultAssay(pbmc.combined) <- "RNA"
+pbmc.combined <- JoinLayers(pbmc.combined)
+pbmc.combined <- RunAzimuth(pbmc.combined, reference = "pbmcref")
+
+#Visualize Aximuth outputs
+umap_cols <- DiscretePalette_scCustomize(num_colors = 26, palette = "glasbey", shuffle_pal = TRUE)
+
+p1 <- UMAPPlot(pbmc.combined, group.by = "predicted.celltype.l2", label = TRUE, label.size = 4, repel = TRUE, cols = umap_cols) + theme(legend.text = element_text(size = 9, colour = "black"), legend.key.size = unit(5, "pt")) + guides( color = guide_legend(ncol = 1), color = guide_legend(override.aes = list(size = 10))) + ggtitle("SSBP PBMC: scATACseq")
+p2 <- UMAPPlot(pbmc.combined, group.by = "orig.ident")
+p1+p2
+p1
+#Add idents based on prediction
+Idents(pbmc.combined) <- "predicted.celltype.l2"
+
+p1 <- FeaturePlot(pbmc.combined, features = "CCR7", reduction = "umap")
+p2 <- FeaturePlot(pbmc.combined, features = "FCGR3A", reduction = "umap")
+p3 <- FeaturePlot(pbmc.combined, features = "ITGAX", reduction = "umap")
+p4 <- FeaturePlot(pbmc.combined, features = "predictionscorecelltypel2_Treg", reduction = "umap")
+
+p1 + p2 + p3 + p4 + plot_layout(ncol = 2)
+DefaultAssay(pbmc.combined) <- "RNA"
+DimPlot(pbmc.combined, label = TRUE, label.size = 3, reduction = "umap", cols = umap_cols) + theme(legend.text = element_text(size = 9, colour = "black"), legend.key.size = unit(10, "pt")) + guides( color = guide_legend(ncol = 1), color = guide_legend(override.aes = list(size = 10))) + ggtitle("SSBP scRNA") + NoAxes()
+dim_plot <- DimPlot(pbmc.combined, split.by = "orig.ident", reduction = "umap", cols = umap_cols) + NoLegend()
+pbmc.combined$orig.ident<- factor(x = pbmc.combined$orig.ident, levels = c("SS-SL", "SS-SD", "SR-SL", "SR-SD"))
+dim_plot
+
+DefaultAssay(pbmc.combined) <- "ATAC"
+dim_plot <- DimPlot(pbmc.combined, split.by = "orig.ident", reduction = "umap", cols = umap_cols) 
+dim_plot
+```
+
+#Linking Peaks to Genes - NLRP3 Coverage Plot
+
+```{r, fig.asp=1, fig.width = '800px'}
+pbmc.combined <- readRDS("../ATACseq SSBP PBMC/final_annotated_pbmc_combined.rds")
+
+DefaultAssay(pbmc.combined) <- "ATAC"
+library(BSgenome.Hsapiens.UCSC.hg38)
+#first compute the GC content for each peak
+pbmc.combined <- RegionStats(pbmc.combined, genome = BSgenome.Hsapiens.UCSC.hg38)
+pbmc.combined$celltype.stim <- paste(pbmc.combined$predicted.celltype.l2, pbmc.combined$orig.ident, sep = "_")
+Idents(pbmc.combined) <- "celltype.stim"
+#link peaks to genes, find peaks that are significantly correlated with the expression of nearby genes
+
+pbmc.combined <- LinkPeaks(
+  object = pbmc.combined,
+  peak.assay = "ATAC",
+  expression.assay = "RNA",
+  genes.use = c("NLRP3")
+)
+
+cov_plot <- CoveragePlot(
+  object = pbmc.combined,
+  region = "NLRP3",
+  features = "NLRP3",
+  expression.assay = "RNA",
+  idents = c( "CD14 Mono_SR-SL", "CD14 Mono_SR-SD","CD14 Mono_SS-SL", "CD14 Mono_SS-SD"),
+  extend.upstream = 500,
+  extend.downstream = 10000,
+  split.by = "orig.ident"
+)
+
+
+
+cov_plot
+```
+
+
+
+#subet monocytes - analyze NLRP3
+```{r}
+#subset monocytes
+mono_subset <- subset(
+  pbmc.combined, 
+  subset = predicted.celltype.l2 %in% c("CD14 Mono", "CD16 Mono"))
+
+cd14 <- subset(
+  mono_subset,
+  subset = celltype.stim %in% c(
+    "CD14 Mono_SS-SL", "CD14 Mono_SS-SD",
+    "CD14 Mono_SR-SL", "CD14 Mono_SR-SD"
+  )
+)
+
+#extract metadata and group assignment
+mono_subset$celltype.stim <- gsub("CD14 Mono", "CD16 Tcells",
+                                         gsub("CD8 TEM", "CD8 Tcells",
+                                              tcell_subset$celltype.stim))
+cd14_df <- cd14@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  mutate(
+    Group = celltype.stim,
+    SaltSensitivity = case_when(
+      grepl("SS-", Group) ~ "SS",
+      grepl("SR-", Group) ~ "SR",
+      TRUE ~ NA_character_
+    ),
+    Condition = case_when(
+      grepl("-SL$", Group) ~ "SL",
+      grepl("-SD$", Group) ~ "SD",
+      TRUE ~ NA_character_
+    ),
+    SubjectID = paste(SaltSensitivity, Condition, sep = "_")
+  )
+
+cd14$SaltSensitivity <- cd14_df$SaltSensitivity
+Idents(cd14) <- "SaltSensitivity"
+
+##Subcluster monocytes and look at differential NLRP3 expression
+#Perform subclustering
+# Normalize and find variable features (if not already done)
+DefaultAssay(cd14) <- "RNA"
+cd14 <- NormalizeData(cd14)
+cd14 <- FindVariableFeatures(cd14)
+cd14 <- ScaleData(cd14)
+
+# PCA and clustering
+cd14 <- RunPCA(cd14)
+cd14 <- FindNeighbors(cd14, dims = 1:10)
+cd14 <- FindClusters(cd14, resolution = 0.3)  # Try a few values (e.g., 0.2–0.6)
+cd14 <- RunUMAP(cd14, dims = 1:10)
+
+# Plot UMAP with monocyte subclusters
+DimPlot(cd14, group.by = "seurat_clusters", reduction = "umap", label = TRUE, pt.size = .5, label.size = 8) +
+  scale_color_brewer(palette = "Set3") +
+  theme_minimal(base_size = 14) + 
+  ggtitle("CD14+ Monocyte Subclusters") +
+  theme(axis.text.x = element_text(size = 12, hjust = 1),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 16, face = "bold"),
+        ) + theme(
+  axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+  strip.text = element_text(face = "bold", size = 16),
+  plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+  panel.spacing = unit(1, "lines"))
+
+
+##Clusters still seaprated by treatment, trying SCTransform
+# Split by group for individual SCTransform normalization
+cd14_list <- SplitObject(cd14, split.by = "orig.ident")
+#run SCTransform
+cd14_list <- lapply(cd14_list, function(x) {
+  SCTransform(x, verbose = FALSE)
+})
+# Select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = cd14_list, nfeatures = 3000)
+
+# Run PrepSCTIntegration if you plan to use SCT-based integration
+cd14_list <- PrepSCTIntegration(object.list = cd14_list, anchor.features = features)
+
+# Merge all datasets back into one object
+cd14 <- merge(cd14_list[[1]], y = cd14_list[-1])
+
+# Run PCA
+cd14 <- RunPCA(cd14, features = features)
+
+library(harmony)
+library(ggplot2)
+# Run Harmony (integrate on condition ID or salt group)
+cd14 <- RunHarmony(cd14, group.by.vars = "orig.ident", assay.use = "SCT")
+
+# Embed into UMAP using Harmony embeddings
+cd14 <- RunUMAP(cd14, reduction = "harmony", dims = 1:20)
+cd14 <- FindNeighbors(cd14, reduction = "harmony", dims = 1:20)
+cd14 <- FindClusters(cd14, resolution = 0.5)  # You can adjust resolution
+
+
+DimPlot(cd14, group.by = "seurat_clusters", reduction = "umap", label = TRUE, label.size = 8) +
+  labs(title = "CD14+ Monocyte Subclusters - Harmony + SCTransform") + 
+scale_color_brewer(palette = "Set2") +
+  theme_minimal(base_size = 16) + 
+  ggtitle("CD14+ Monocyte Subclusters-Singlets") + 
+  theme(axis.text.x = element_text(size = 16, hjust = 1, angle = 45),
+        axis.text.y = element_text(size = 16, hjust = 1),
+        plot.title = element_text(face = "bold"),
+        legend.text = element_text(size = 16),
+  ) 
+
+# Create a new metadata column for salt group (SS-SL, etc.)
+cd14$SaltGroup <- cd14$celltype.stim  # assuming this exists
+
+# Re-fetch the data from the Seurat object to ensure all metadata is included
+expr_df_singlet <- FetchData(cd14, vars = c("rna_NLRP3", "orig.ident", "seurat_clusters"))
+
+# Convert to proper factor with desired order
+expr_df_singlet$SaltGroup <- factor(expr_df_singlet$orig.ident, 
+                                    levels = c("SS-SL", "SS-SD", "SR-SL", "SR-SD"))
+
+# Double-check levels (optional)
+levels(expr_df_singlet$SaltGroup)
+
+# Violin plot with jitter per cluster and salt group
+ggplot(expr_df_singlet, aes(x = SaltGroup, y = rna_NLRP3, fill = SaltGroup)) +
+  geom_violin(trim = FALSE, scale = "width", alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.4) +
+  facet_wrap(~ seurat_clusters, ncol = 3, labeller = labeller(seurat_clusters = function(x) paste("Cluster:", x))) +
+theme_minimal(base_size = 14) +
+  labs(
+    title = "NLRP3 Expression by Monocyte Subcluster",
+    x = "Salt Group",
+    y = "Log-Normalized NLRP3 Expression"
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, hjust = 1),
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(size = 14),
+    strip.text = element_text (size = 14, face = "bold")
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
