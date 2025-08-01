@@ -6,7 +6,7 @@ R scripts for data processing and QC from our 2025 Circulation Research paper - 
 This repository contains the R code used in our manuscript:  
 **"Isolevuglandins modulate histone H1 in myeloid cells in salt-sensitive hypertension"**
 
-The analysis focuses on multiomic single-cell ATAC and gene expression data derived from PBMCs isolated from salt-sensitive (SS) and salt-resistant (SR) individuals. Using the Seurat + Signac + chromVAR pipeline, we investigate chromatin accessibility changes in response to IsoLG stress, highlighting histone H1 dynamics in myeloid populations.
+The analysis focuses on multiomic single-cell ATAC and gene expression data derived from PBMCs isolated from salt-sensitive (SS) and salt-resistant (SR) individuals. Using the Seurat + Signac pipeline, we investigate chromatin accessibility changes in response to IsoLG stress, highlighting histone H1 dynamics in myeloid populations.
 
 > 💡 This script was written for transparency and reproducibility, enabling others to replicate our pipeline and build upon our findings.
 
